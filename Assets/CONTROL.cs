@@ -1,24 +1,23 @@
-using UnityEngine; //Libreria basica
-using UnityEngine.InputSystem; //Sirve opara definir y conectar las entradas con el codigo
+using UnityEngine;
+using UnityEngine.InputSystem;
 
 public class CONTROL : MonoBehaviour
 {
-    //Varibales de nuestro personaje y al mismo tiempo las variables para nuestros 
     Rigidbody rb;
-
-    public InputSystem_Actions actions;
-
-    public float speed;
-
-    float smoothVelocityX; //Variiable que usaremos paras suavizar el traslado de un numero flotante a otro
-
-    public float jumpforce;
-
-    float move;
-
-    bool isGrounded;
-
     Animator animator;
+
+    [Header("Configuración de Entradas")]
+    public InputSystem_Actions actions;
+    private Vector2 inputMovimiento;
+    private bool estaCorriendo; // Nueva variable para saber si se presiona Shift
+
+    [Header("Configuración de Movimiento")]
+    public float walkingSpeed = 3.0f; // Velocidad al caminar
+    public float runningSpeed = 7.0f; // Velocidad al correr
+    public float jumpforce = 5.0f;
+
+    private float smoothVelocity;
+    private bool isGrounded;
 
     void Awake()
     {
@@ -28,36 +27,43 @@ public class CONTROL : MonoBehaviour
     void OnEnable()
     {
         actions.Player.Enable();
+
         actions.Player.Move.performed += Movement;
+        actions.Player.Move.canceled += Movement;
+
         actions.Player.Jump.performed += Jumping;
 
-        actions.Player.Move.canceled += Movement;
-        actions.Player.Jump.canceled += Jumping;
+        // --- NUEVAS LÍNEAS PARA EL SHIFT (SPRINT) ---
+        // Cuando se presiona Shift, activamos la carrera
+        actions.Player.Sprint.performed += ctx => estaCorriendo = true;
+        // Cuando se suelta Shift, volvemos a caminar
+        actions.Player.Sprint.canceled += ctx => estaCorriendo = false;
     }
 
     void OnDisable()
     {
         actions.Player.Disable();
         actions.Player.Move.performed -= Movement;
+        actions.Player.Move.canceled -= Movement;
         actions.Player.Jump.performed -= Jumping;
 
-        actions.Player.Move.canceled -= Movement;
-        actions.Player.Jump.canceled -= Jumping;
+        // Nos desuscribimos del Sprint
+        actions.Player.Sprint.performed -= ctx => estaCorriendo = true;
+        actions.Player.Sprint.canceled -= ctx => estaCorriendo = false;
     }
-
 
     void Movement(InputAction.CallbackContext ctx)
     {
-        move = ctx.ReadValue<Vector2>().x;
+        inputMovimiento = ctx.ReadValue<Vector2>();
     }
 
     void Jumping(InputAction.CallbackContext ctx)
     {
         if (isGrounded)
         {
-            rb.linearVelocityY = jumpforce;
+            rb.linearVelocity = new Vector3(rb.linearVelocity.x, jumpforce, rb.linearVelocity.z);
             isGrounded = false;
-            animator.SetBool("isJumping", !isGrounded);
+            animator.SetTrigger("Jump");
         }
     }
 
@@ -65,41 +71,76 @@ public class CONTROL : MonoBehaviour
     {
         rb = GetComponent<Rigidbody>();
         animator = GetComponent<Animator>();
+
+        // Evita que el mutante se tropiece y se caiga de lado al chocar
+        rb.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ;
     }
 
     void Update()
     {
-        rb.linearVelocityX = move * speed;
+        // 1. CALCULAR DIRECCIÓN DE TRASLADO 3D
+        Vector3 direccionMovimiento = new Vector3(inputMovimiento.x, 0, inputMovimiento.y);
 
-        // --- LOGICA DE SUAVIZADO ---
-        // Esta parte nos permite saber de que limite a que limite queremos llegar (6 o -6)
-        float targetVelocity = Mathf.Abs(rb.linearVelocityX);
+        // EVALUACIÓN DE VELOCIDAD: Si está presionando Shift, usa runningSpeed; si no, walkingSpeed
+        float velocidadActual = estaCorriendo ? runningSpeed : walkingSpeed;
 
-        // MoveTowards(valor_actual, destino, velocidad_de_cambio)
-        // Cambia el '10f' por un número más bajo si quieres que tarde MÁS en acelerar
-        smoothVelocityX = Mathf.MoveTowards(smoothVelocityX, targetVelocity, 10f * Time.deltaTime);
+        // Multiplicamos la dirección por la velocidad elegida
+        Vector3 velocidadFinal = direccionMovimiento * velocidadActual;
 
-        // Le pasamos el valor suavizado al Animator
-        animator.SetFloat("v_x", smoothVelocityX);
+        // Aplicamos la velocidad al Rigidbody
+        rb.linearVelocity = new Vector3(velocidadFinal.x, rb.linearVelocity.y, velocidadFinal.z);
 
-        animator.SetFloat("v_y", rb.linearVelocityY);
-        flip();
+        // 2. ROTACIÓN EN 3D
+        if (direccionMovimiento.magnitude > 0.1f)
+        {
+            Quaternion rotacionObjetivo = Quaternion.LookRotation(direccionMovimiento);
+            transform.rotation = Quaternion.Slerp(transform.rotation, rotacionObjetivo, 15f * Time.deltaTime);
+        }
+
+        // 3. LOGICA DE SUAVIZADO PARA EL BLEND TREE
+        // Si no nos movemos, el objetivo es 0. 
+        // Si nos movemos caminando, el objetivo es la velocidad de caminata (ej. 3).
+        // Si corremos, el objetivo es la velocidad de carrera (ej. 7).
+        float targetVelocity = velocidadFinal.magnitude;
+
+        // MoveTowards incrementará o decrementará el valor de forma fluida
+        smoothVelocity = Mathf.MoveTowards(smoothVelocity, targetVelocity, 30f * Time.deltaTime);
+
+        // Le pasamos el valor al parámetro "Speed" de tu Blend Tree
+        animator.SetFloat("Speed", smoothVelocity);
     }
 
-    void flip()
+    private void OnCollisionEnter(Collision collision)
     {
-
-        if (rb.linearVelocityX > 0.1f)
-            GetComponent<SpriteRenderer>().flipX = false;
-
-        if (rb.linearVelocityX < -0.1f)
-            GetComponent<SpriteRenderer>().flipX = true;
+        // Revisamos si impactamos con algo desde abajo (el suelo)
+        foreach (ContactPoint contacto in collision.contacts)
+        {
+            // Si el vector apunta hacia arriba, es el suelo
+            if (contacto.normal.y > 0.6f)
+            {
+                isGrounded = true;
+                break;
+            }
+        }
     }
 
-    private void OnCollisionEnter(Collision collision2D)
+    // Opcional: Añadimos esto para cuando el personaje camine por bordes o rampas
+    private void OnCollisionStay(Collision collision)
     {
-        isGrounded = true;
-        animator.SetBool("isJumping", !isGrounded);
+        foreach (ContactPoint contacto in collision.contacts)
+        {
+            if (contacto.normal.y > 0.6f)
+            {
+                isGrounded = true;
+            }
+        }
     }
+
+    private void OnCollisionExit(Collision collision)
+    {
+        // En cuanto dejas de tocar el objeto, ya no estás en el suelo
+        isGrounded = false;
+    }
+
 
 }
